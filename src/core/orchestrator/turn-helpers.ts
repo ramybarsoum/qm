@@ -100,29 +100,6 @@ export function visibleSkillScopes(resolution: Resolution, scopeId: ScopeId): Sc
   return [memoryScopeId, ...teamScopes, resolution.orgScopeId];
 }
 
-const CONNECTOR_SKILL_PROVIDERS: Readonly<Record<string, string>> = {
-  dropbox: "dropbox",
-  "email-draft-in-voice": "google",
-  "email-voice-profile": "google",
-  "google-drive-sheets": "google",
-  "google-workspace": "google",
-  linear: "linear",
-  "morning-digest": "x",
-  "slack-drafts": "slack",
-  x: "x",
-};
-
-export function filterConnectorSkills(
-  resolved: SkillResolution[],
-  availableProviders: readonly string[],
-): SkillResolution[] {
-  const available = new Set(availableProviders);
-  return resolved.filter((entry) => {
-    const provider = entry.skill ? CONNECTOR_SKILL_PROVIDERS[entry.skill.manifest.name] : undefined;
-    return !provider || available.has(provider);
-  });
-}
-
 export async function loadActiveBundles(store: SkillBundleStore, resolved: SkillResolution[]): Promise<SkillBundle[]> {
   const packIds = [...new Set(resolved.map((r) => r.skill?.pack?.packId).filter((id): id is string => Boolean(id)))];
   const bundles = await Promise.all(packIds.map((id) => store.get(id)));

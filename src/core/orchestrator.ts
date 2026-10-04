@@ -61,6 +61,7 @@ import {
   configuredConnectorProviders,
   connectorStatusIsStale,
   refreshConnectorStatus,
+  filterConnectorSkills,
 } from "../credentials/connector-status.ts";
 import { renderComputerBlock, renderResidentLoginsBlock, renderConnectedAppsBlock } from "./environment-facts.ts";
 import { PROVIDERS } from "../connectors/oauth.ts";
@@ -161,7 +162,6 @@ import {
   conversationLabelFor,
   deliveryCandidatesFor,
   egressClaimAllowingControlPlane,
-  filterConnectorSkills,
   isScreenableTextAttachment,
   loadTapeImage,
   recentPrincipalDeliveryNote,
@@ -188,12 +188,8 @@ import { createSurfaceToolDeps, type SpineState } from "./orchestrator/surface-t
 import { createAttachStaging } from "./orchestrator/attach-tool.ts";
 import { reconcileMessageRevisions, revisionAnchorAt } from "./message-revisions.ts";
 
-export {
-  egressClaimAllowingControlPlane,
-  conversationLabelFor,
-  filterConnectorSkills,
-  loadTapeImage,
-} from "./orchestrator/turn-helpers.ts";
+export { egressClaimAllowingControlPlane, conversationLabelFor, loadTapeImage } from "./orchestrator/turn-helpers.ts";
+export { filterConnectorSkills } from "../credentials/connector-status.ts";
 export type { Orchestrator, OrchestratorDeps, OrchestratorInput, SurfaceContextPuller } from "./orchestrator/types.ts";
 
 class ProjectRosterChanged extends Error {}

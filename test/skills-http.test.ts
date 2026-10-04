@@ -12,7 +12,7 @@ import { scopeId, type ScopeId } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
 
-function start() {
+function start(options: { configuredProviders?: readonly string[] } = {}) {
   const built = buildApp(
     testConfig({
       dataDir: mkdtempSync(join(tmpdir(), "skills-http-")),
@@ -20,7 +20,17 @@ function start() {
       seedSkills: false,
     }),
   );
-  const server = createInsecureTestServer(built.app);
+  const configured = options.configuredProviders;
+  const server = createInsecureTestServer(built.app, {
+    ...(configured
+      ? {
+          resolveClient: async (provider: string) => {
+            if (!configured.includes(provider)) throw new Error(`no client for ${provider}`);
+            return { id: `${provider}-id`, secret: `${provider}-secret`, clientRef: provider };
+          },
+        }
+      : {}),
+  });
   server.listen(0);
   const base = `http://localhost:${(server.address() as AddressInfo).port}`;
   return {
@@ -326,6 +336,64 @@ test("GET /v1/skills can include every active scope variant without changing the
     );
     assert.equal(notes[0]!.shadowed, true);
     assert.equal(notes[1]!.shadowed, false);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("GET /v1/skills only drops connector skills when asked, and only the unconfigured ones", async () => {
+  const srv = start({ configuredProviders: ["linear"] });
+  try {
+    await publish(srv.skills, scopeId("personal", "U1"), "notes", "keep notes");
+    await publish(srv.skills, scopeId("personal", "U1"), "linear", "read and write Linear issues");
+    await publish(srv.skills, scopeId("personal", "U1"), "slack-drafts", "draft Slack messages");
+
+    const normal = (await (await fetch(`${srv.base}/v1/skills?principalId=U1`)).json()) as { skills: SkillView[] };
+    assert.deepEqual(
+      normal.skills.map((skill) => skill.name).sort(),
+      ["linear", "notes", "slack-drafts"],
+      "the default projection is unchanged and still lists every connector skill",
+    );
+
+    const filtered = (await (await fetch(`${srv.base}/v1/skills?principalId=U1&connectorConfigured=1`)).json()) as {
+      skills: SkillView[];
+    };
+    assert.deepEqual(
+      filtered.skills.map((skill) => skill.name).sort(),
+      ["linear", "notes"],
+      "Linear has a client so its skill stays; Slack has none so the skill a turn would drop is not offered",
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
+test("GET /v1/skills filters archived connector skills on the same terms as active ones", async () => {
+  const srv = start({ configuredProviders: [] });
+  try {
+    await publish(srv.skills, scopeId("personal", "U1"), "notes", "keep notes");
+    const linear = await srv.skills.create({
+      scopeId: scopeId("personal", "U1"),
+      manifest: {
+        name: "linear",
+        description: "read and write Linear issues",
+        requiredCapabilities: [],
+        body: "# linear",
+      },
+      createdBy: "author",
+    });
+    await srv.skills.review(linear.id, "reviewer-1", []);
+    await srv.skills.publish(linear.id);
+    await srv.skills.archive(linear.id);
+
+    const filtered = (await (await fetch(`${srv.base}/v1/skills?principalId=U1&connectorConfigured=1`)).json()) as {
+      skills: SkillView[];
+    };
+    assert.deepEqual(
+      filtered.skills.map((skill) => skill.name),
+      ["notes"],
+      "an archived connector skill is not smuggled past the filter by the manageable-skills branch",
+    );
   } finally {
     await srv.close();
   }

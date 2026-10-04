@@ -33,6 +33,7 @@ import {
 } from "../../surfaces/ui-state.ts";
 import { redactWebhook } from "./webhooks.ts";
 import { type ApiCtx, type Route } from "./route.ts";
+import { configuredConnectorProviders, filterConnectorSkills } from "../../credentials/connector-status.ts";
 import {
   ARTIFACT_TYPES,
   isArtifactType,
@@ -750,11 +751,17 @@ async function agentMemory(ctx: ApiCtx): Promise<void> {
   return sendJson(res, 404, { error: "not_found", message: `${method} ${pathname}` });
 }
 
+async function configuredProviders(deps: ApiCtx["deps"]): Promise<string[]> {
+  if (!deps.resolveClient) return [];
+  return configuredConnectorProviders(deps.resolveClient).catch(() => []);
+}
+
 async function listSkills(ctx: ApiCtx): Promise<void> {
-  const { res, app, url } = ctx;
+  const { res, app, deps, url } = ctx;
   const principalId = url.searchParams.get("principalId");
   if (!principalId) return sendJson(res, 400, { error: "bad_request", message: "principalId required" });
   const includeShadowed = url.searchParams.get("includeShadowed") === "1";
+  const connectorConfigured = url.searchParams.get("connectorConfigured") === "1";
   const resolved = (await app.listVisibleSkills(principalId)).filter(
     (r): r is SkillResolution & { skill: Skill } => r.skill !== null,
   );
@@ -768,8 +775,11 @@ async function listSkills(ctx: ApiCtx): Promise<void> {
     { skill: row.skill, shadowed: row.shadowed },
     ...(includeShadowed ? row.shadowed.map((skill) => ({ skill, shadowed: [] })) : []),
   ]);
+  const rows = connectorConfigured
+    ? filterConnectorSkills([...visible, ...archived], await configuredProviders(deps))
+    : [...visible, ...archived];
   const skills = await Promise.all(
-    [...visible, ...archived].map(async (r) => ({
+    rows.map(async (r) => ({
       id: r.skill.id,
       name: r.skill.manifest.name,
       description: r.skill.manifest.description,

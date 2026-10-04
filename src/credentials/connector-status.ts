@@ -106,6 +106,29 @@ export function connectorLabel(name: string): string {
   return PROVIDER_LABELS[name] ?? name.charAt(0).toUpperCase() + name.slice(1);
 }
 
+const CONNECTOR_SKILL_PROVIDERS: Readonly<Record<string, string>> = {
+  dropbox: "dropbox",
+  "email-draft-in-voice": "google",
+  "email-voice-profile": "google",
+  "google-drive-sheets": "google",
+  "google-workspace": "google",
+  linear: "linear",
+  "morning-digest": "x",
+  "slack-drafts": "slack",
+  x: "x",
+};
+
+export function filterConnectorSkills<T extends { skill: { manifest: { name: string } } | null }>(
+  resolved: readonly T[],
+  availableProviders: readonly string[],
+): T[] {
+  const available = new Set(availableProviders);
+  return resolved.filter((entry) => {
+    const provider = entry.skill ? CONNECTOR_SKILL_PROVIDERS[entry.skill.manifest.name] : undefined;
+    return !provider || available.has(provider);
+  });
+}
+
 export async function configuredConnectorProviders(resolveClient: OAuthClientResolver): Promise<string[]> {
   const configured = await Promise.all(
     Object.keys(PROVIDERS).map(async (provider) => {
