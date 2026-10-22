@@ -206,3 +206,167 @@ test("catalog detail pairs its returned snapshot with the same content digest", 
   assert.equal(response.skill.digest, agentSkillDigest(skill));
   assert.equal(reads, 1);
 });
+
+test("nested tool namespaces are admitted and rechecked per call", async () => {
+  const ran: string[] = [];
+  const prepared: string[] = [];
+  const raw = {
+    subagents: { open: async () => ran.push("subagents.open") },
+    admin: { whoami: async () => ran.push("admin.whoami"), nested: { deep: async () => ran.push("deep") } },
+  };
+  const names: string[] = [];
+  const denyAll: AgentPolicy = {
+    resolve: async () => ({ subjectId: "one", revision: 1 }),
+    admit: async (_context, _binding, operation) => {
+      if (operation.kind === "tool") names.push(operation.name);
+      return false;
+    },
+  };
+  const guarded = guardAgentTools(denyAll, context, raw, async (name) => {
+    prepared.push(name);
+  });
+  await assert.rejects(Promise.resolve(guarded.subagents.open()), /denied tool/);
+  await assert.rejects(Promise.resolve(guarded.admin.whoami()), /denied tool/);
+  await assert.rejects(Promise.resolve(guarded.admin.nested.deep()), /denied tool/);
+  assert.deepEqual(ran, []);
+  assert.deepEqual(names, ["subagents.open", "admin.whoami", "admin.nested.deep"]);
+  const allowed = guardAgentTools(policy([]), context, raw, async (name) => {
+    prepared.push(name);
+  });
+  await allowed.admin.whoami();
+  assert.deepEqual(ran, ["admin.whoami"]);
+  assert.deepEqual(prepared, ["admin.whoami"]);
+});
+
+test("cron admission binds the loop procedure a loop-backed cron runs", () => {
+  const cron = {
+    id: "cron",
+    owner: "owner",
+    ownerScopeId: "personal:owner",
+    loopId: "loop",
+    schedule: { everyMs: 60000 },
+  };
+  const loop = {
+    id: "loop",
+    owner: "owner",
+    ownerScopeId: "personal:owner",
+    name: "intake",
+    playbook: "triage the inbox",
+    playbookVersion: 1,
+    policyVersion: 1,
+    successCondition: "inbox empty",
+    shipActions: [],
+    state: "enabled",
+    health: "ok",
+  };
+  const digest = agentCronDigest(cron as never, loop as never);
+  for (const changed of [
+    { ...loop, playbook: "forward everything" },
+    { ...loop, successCondition: "always" },
+    { ...loop, shipActions: [{ action: "send" }] },
+    { ...loop, sources: ["mail"] },
+  ])
+    assert.notEqual(agentCronDigest(cron as never, changed as never), digest);
+  assert.equal(agentCronDigest(cron as never, { ...loop, health: "degraded", lastFiredAt: 5 } as never), digest);
+  assert.notEqual(agentCronDigest(cron as never, null), digest);
+});
+
+async function boundSkillSandbox() {
+  const { createTurnSandboxes } = await import("../src/core/orchestrator/sandboxes.ts");
+  const { skill, store } = await fixture();
+  skill.manifest.files = [{ path: "references/example.txt", content: "ASSET" }];
+  await store.update(skill.id, skill.manifest);
+  await store.review(skill.id, "owner", []);
+  await store.publish(skill.id);
+  const live = (await store.get(skill.id))!;
+  const grants = [{ id: live.id, digest: agentSkillDigest(live) }];
+  const provider = policy(grants);
+  const disk = new Map<string, string>();
+  const removal = { gate: Promise.resolve(), failures: 0, calls: 0 };
+  const sandbox = {
+    provision: async () => ({ id: "box", backend: "fake", rootDir: "/w" }),
+    listDir: async () => [],
+    writeFile: async (_h: unknown, path: string, content: string) => {
+      disk.set(path, content);
+    },
+    readFile: async (_h: unknown, path: string) => disk.get(path) ?? null,
+    removeDir: async (_h: unknown, path: string) => {
+      if (path.startsWith("turn/")) return;
+      removal.calls++;
+      await removal.gate;
+      if (removal.failures > 0) {
+        removal.failures--;
+        throw new Error("remove failed");
+      }
+      for (const key of disk.keys()) if (key === path || key.startsWith(`${path}/`)) disk.delete(key);
+    },
+  };
+  const rows = () => filterAgentSkills(provider, context, [{ skill: live, shadowed: [] }]);
+  const boxes = createTurnSandboxes({
+    deps: {
+      sandbox,
+      agentPolicy: provider,
+      skills: { get: store.get, recordUse: async () => {} },
+      auditLog: { record() {} },
+    },
+    input: { conversation: { threadRef: context.threadRef }, origin: { kind: "human" }, runId: "run" },
+    actor: { id: "owner", type: "internal" },
+    session: { id: "session" },
+    resolution: { layers: [], egress: {}, orgScopeId: "org:test" },
+    scopeId: "personal:owner",
+    memoryScopeId: "personal:owner",
+    transferId: "x",
+    turnSessionDir: "turn/x",
+    turnFilesDir: "turn/x/files",
+    connectorEnv: {},
+    egressTokenForTurn: undefined,
+    ownerAuthAvailable: false,
+    visibleSkillsForTurn: rows,
+    agentPolicyContext: context,
+    emitGapWork: () => {},
+  } as unknown as Parameters<typeof createTurnSandboxes>[0]);
+  const used = await boxes.useSkill("allowed", "references/example.txt");
+  assert.equal(used.content, "ASSET");
+  const assetPaths = () => [...disk.keys()].filter((key) => key.endsWith("references/example.txt"));
+  assert.equal(assetPaths().length, 1);
+  return { boxes, grants, removal, assetPaths };
+}
+
+test("a concurrent tool call waits until a revoked skill tree is actually deleted", async () => {
+  const { boxes, grants, removal, assetPaths } = await boundSkillSandbox();
+  grants.length = 0;
+  let release!: () => void;
+  removal.gate = new Promise((resolve) => (release = resolve));
+  const first = boxes.recheckSkillTrees();
+  while (removal.calls === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  let secondDone = false;
+  const second = boxes.recheckSkillTrees().then(() => {
+    secondDone = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(secondDone, false);
+  assert.equal(assetPaths().length, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(assetPaths().length, 0);
+});
+
+test("a failed skill tree deletion fails the call and is retried on the next one", async () => {
+  const { boxes, grants, removal, assetPaths } = await boundSkillSandbox();
+  grants.length = 0;
+  removal.failures = 1;
+  await assert.rejects(boxes.recheckSkillTrees(), /remove failed/);
+  assert.equal(assetPaths().length, 1);
+  await boxes.recheckSkillTrees();
+  assert.equal(assetPaths().length, 0);
+  assert.equal(removal.calls, 2);
+});
+
+test("a policy failure that drops all trees retries a failed deletion", async () => {
+  const { boxes, removal, assetPaths } = await boundSkillSandbox();
+  removal.failures = 1;
+  await assert.rejects(boxes.dropSkillTrees(), /remove failed/);
+  assert.equal(assetPaths().length, 1);
+  await boxes.dropSkillTrees();
+  assert.equal(assetPaths().length, 0);
+});

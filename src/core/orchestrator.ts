@@ -1890,8 +1890,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       };
       const commandPolicy = resolution.commandPolicy;
       const layerCommandRules = [...(deps.deploymentLayer?.commandRules ?? [])];
-      const reachAvailable = !!deps.reachExec && !!deps.directory && conversation.kind === "dm";
-      const turnSandboxResources = external
+      const reachAvailable = !agentPolicyBound && !!deps.reachExec && !!deps.directory && conversation.kind === "dm";
+      const sharedSandboxResources = external
         ? deps.sandboxResources?.forTurn({
             actorId: actor.id,
             scopeId,
@@ -1909,6 +1909,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               )),
           })
         : deps.sandboxResources;
+      const turnSandboxResources = agentPolicyBound ? undefined : sharedSandboxResources;
       const workspaceLayout = {
         hasGlobal: resolution.layers.some((l) => l.mountPath === "global"),
         teamCount: resolution.layers.filter((l) => l.mountPath.startsWith("team-")).length,

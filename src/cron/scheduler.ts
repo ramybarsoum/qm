@@ -2,7 +2,14 @@ import { agentCronDigest, admitAgentOperation, type AgentPolicy } from "../auth/
 import { cronTriggerAuthority } from "./authority.ts";
 import { WorkAdmissionClosed, type AdmittedWork } from "../util/admitted-work.ts";
 import { randomUUID } from "node:crypto";
-import { type Cron, type CronFireLogEntry, type CronFireNote, type TurnRequest, type TurnResult } from "../types.ts";
+import {
+  type Cron,
+  type CronFireLogEntry,
+  type CronFireNote,
+  type Loop,
+  type TurnRequest,
+  type TurnResult,
+} from "../types.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import { isDeferred, type CronStore } from "./cron-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
@@ -87,6 +94,7 @@ export interface SchedulerDeps {
   resolveRecipient?: TriggerDeps["resolveRecipient"];
   skipFire?: (cron: Cron) => Promise<string | undefined>;
   deleteCron?: (id: string) => Promise<void>;
+  loadLoop?: (loopId: string) => Promise<Loop | null>;
   fireLoop?: (
     loopId: string,
     fireKey: string,
@@ -245,7 +253,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           threadRef,
           trigger: { id: cron.id, fireKey },
         },
-        { kind: "cron", payloadDigest: agentCronDigest(cron) },
+        {
+          kind: "cron",
+          payloadDigest: agentCronDigest(cron, cron.loopId ? await deps.loadLoop?.(cron.loopId) : undefined),
+        },
       ))
     ) {
       await deps.crons.recordFire(cron.id, {

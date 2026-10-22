@@ -277,15 +277,28 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       : null;
     return agentSkillDigest(r.skill, bundle);
   };
-  const dropSkillTrees = async (keep: (skillId: string, digest?: string) => Promise<boolean> = async () => false) => {
-    for (const [key, tree] of laidTrees) {
-      if (await keep(tree.skillId, tree.digest).catch(() => false)) continue;
-      laidTrees.delete(key);
-      await deps.sandbox.removeDir(tree.handle, tree.root);
-    }
+  let skillTreeCleanup: Promise<void> = Promise.resolve();
+  const dropSkillTrees = (
+    keep: (skillId: string, digest?: string) => Promise<boolean> = async () => false,
+  ): Promise<void> => {
+    const run = skillTreeCleanup.then(async () => {
+      let failure: unknown;
+      for (const [key, tree] of laidTrees) {
+        if (await keep(tree.skillId, tree.digest).catch(() => false)) continue;
+        try {
+          await deps.sandbox.removeDir(tree.handle, tree.root);
+          laidTrees.delete(key);
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+      if (failure) throw failure;
+    });
+    skillTreeCleanup = run.catch(() => {});
+    return run;
   };
   const recheckSkillTrees = async (): Promise<void> => {
-    if (!agentPolicyContext || !laidTrees.size) return;
+    if (!agentPolicyContext) return;
     await dropSkillTrees(async (skillId, digest) => {
       const live = await deps.skills?.get(skillId);
       if (!live) return false;
@@ -390,7 +403,11 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     }
     return true;
   };
+  const denyBoundSandbox = () => {
+    if (agentPolicyContext) throw new Error("agent policy denied sandbox access");
+  };
   const accessResource = async (id: string): Promise<SandboxAccessPlan> => {
+    denyBoundSandbox();
     const resource = await accessConversationSandbox(deps.sandboxResources, actor.id, id, canUseSandboxScope);
     const crossScope = resource.ownerScopeId !== writableScopeId && resource.ownerScopeId !== scopeId;
     if (!crossScope) return { resource, crossScope: false, egress: resolution.egress, commandPolicy: null };
@@ -408,6 +425,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     input: string | SandboxAccessPlan,
     authorize?: (access: SandboxAccessPlan) => void,
   ): Promise<SandboxHandle> => {
+    denyBoundSandbox();
     const access = typeof input === "string" ? await accessResource(input) : input;
     const { resource, crossScope, egress, credentialScopeId } = access;
     const id = resource.id;
@@ -463,9 +481,9 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       scratchStartedAt = provisionStart;
       recordScratchLifecycle("provision_started");
       const handle = await deps.sandbox.provision(
-        resolution.layers.filter((l) => l.mode === "ro" && l.mountPath === "global"),
+        agentPolicyContext ? [] : resolution.layers.filter((l) => l.mode === "ro" && l.mountPath === "global"),
         {
-          env: connectorEnv,
+          env: agentPolicyContext ? {} : connectorEnv,
           egress: resolution.egress,
           ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
           scratch: { key: scratchKey() },
@@ -541,6 +559,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     : undefined;
   const reachBoxes = new Map<ScopeId, SandboxHandle>();
   const provisionForReach = async (target: ScopeId): Promise<SandboxHandle> => {
+    denyBoundSandbox();
     const cached = reachBoxes.get(target);
     if (cached) return cached;
     const handle = await deps.sandbox.provision(
@@ -781,7 +800,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       box.handle = null;
       box.pending = null;
       provisionInFlight = null;
-      laidTrees.clear();
+      if (!agentPolicyContext) laidTrees.clear();
     },
   };
 }

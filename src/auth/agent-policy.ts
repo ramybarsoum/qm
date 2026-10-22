@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import type { Cron } from "../types.ts";
+import type { Cron, Loop } from "../types.ts";
 import type { Skill, SkillResolution } from "../skills/skill-store.ts";
 import type { SkillBundle, SkillBundleStore } from "../skills/skill-bundle-store.ts";
 
@@ -133,12 +133,16 @@ export function loadAgentPolicyModule(path: string): AgentPolicy {
   };
 }
 
+type AgentGuarded<V> = V extends (...args: infer A) => infer R
+  ? (...args: A) => R | Promise<Awaited<R>>
+  : V extends readonly unknown[]
+    ? V
+    : V extends object
+      ? { [K in keyof V]: AgentGuarded<V[K]> }
+      : V;
+
 export type AgentGuardedTools<T> = {
-  [K in keyof T]: T[K] extends (...args: infer A) => infer R
-    ? K extends "mcpToolDefs"
-      ? T[K]
-      : (...args: A) => R | Promise<Awaited<R>>
-    : T[K];
+  [K in keyof T]: K extends "mcpToolDefs" ? T[K] : AgentGuarded<T[K]>;
 };
 
 export function guardAgentTools<T extends object>(
@@ -149,29 +153,62 @@ export function guardAgentTools<T extends object>(
   invalidate?: () => Promise<void>,
 ): AgentGuardedTools<T> {
   if (!policy) return tools as AgentGuardedTools<T>;
-  return new Proxy(tools, {
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
-      if (typeof value !== "function" || typeof property !== "string" || property === "mcpToolDefs") return value;
-      return async (...input: unknown[]) => {
-        try {
-          const binding = await policy.resolve(context);
-          if (binding) {
-            if (!(await policy.admit(context, binding, { kind: "tool", name: property, input })))
-              throw new Error("agent policy denied tool admission");
-            await prepare?.(property, input);
-          }
-        } catch (error) {
-          await invalidate?.();
-          throw error;
+  const guard = (target: object, prefix: string): object => {
+    const nested = new Map<string, object>();
+    return new Proxy(target, {
+      get(inner, property) {
+        const value = Reflect.get(inner, property);
+        if (typeof property !== "string" || (!prefix && property === "mcpToolDefs")) return value;
+        const name = `${prefix}${property}`;
+        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+          let wrapped = nested.get(property);
+          if (!wrapped) nested.set(property, (wrapped = guard(value, `${name}.`)));
+          return wrapped;
         }
-        return Reflect.apply(value, target, input);
-      };
-    },
-  }) as AgentGuardedTools<T>;
+        if (typeof value !== "function") return value;
+        return async (...input: unknown[]) => {
+          try {
+            const binding = await policy.resolve(context);
+            if (binding) {
+              if (!(await policy.admit(context, binding, { kind: "tool", name, input })))
+                throw new Error("agent policy denied tool admission");
+              await prepare?.(name, input);
+            }
+          } catch (error) {
+            await invalidate?.();
+            throw error;
+          }
+          return Reflect.apply(value, inner, input);
+        };
+      },
+    });
+  };
+  return guard(tools, "") as AgentGuardedTools<T>;
 }
 
-export function agentCronDigest(cron: Cron): string {
+function loopProcedure(cron: Cron, loop: Loop | null | undefined): unknown {
+  if (!cron.loopId) return null;
+  if (!loop) return "missing-loop";
+  return {
+    id: loop.id,
+    owner: loop.owner,
+    ownerScopeId: loop.ownerScopeId,
+    name: loop.name,
+    purpose: loop.purpose ?? null,
+    surface: loop.surface ?? null,
+    sources: loop.sources ?? [],
+    playbook: loop.playbook,
+    successCondition: loop.successCondition,
+    successChecks: loop.successChecks ?? [],
+    shipActions: loop.shipActions ?? [],
+    caps: loop.caps ?? null,
+    governor: loop.governor ?? null,
+    triage: loop.triage ?? null,
+    destination: loop.destination ?? null,
+  };
+}
+
+export function agentCronDigest(cron: Cron, loop?: Loop | null): string {
   const canonical = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(canonical);
     if (value !== null && typeof value === "object")
@@ -198,6 +235,7 @@ export function agentCronDigest(cron: Cron): string {
           cron.schedule,
           cron.runtime ?? null,
           cron.unattendedGrants ?? [],
+          loopProcedure(cron, loop),
         ]),
       ),
     )

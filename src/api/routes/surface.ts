@@ -1439,7 +1439,7 @@ export const surfaceRoutes: ReadonlyArray<Route<ApiCtx>> = [
     { method: "GET", path: "/v1/contexts", auth: "source", handle: listContexts },
     { method: "GET", path: "/v1/scope-resources", auth: "source", handle: listScopeResources },
     { method: "GET", path: "/v1/memory", auth: "source", handle: selfMemory },
-    { method: "GET", path: "/v1/skills", auth: "source", handle: listSkills },
+    { method: "GET", path: "/v1/skills", auth: "either", handle: listSkills },
     { method: "GET", path: "/v1/skills/:id", auth: "either", handle: getSkillDetail },
   ]),
   ...withActor("query.viewer", [

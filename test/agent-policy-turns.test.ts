@@ -4,6 +4,12 @@ import assert from "node:assert/strict";
 import { buildApp } from "./support/build-app.ts";
 import { createMockHarness } from "./support/mock-harness.ts";
 import { testConfig } from "./support/test-config.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { createServer } from "../src/api/server.ts";
+import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
 import { runNowSettled } from "./support/settle.ts";
 import { singleProcessDeps } from "./support/single-process.ts";
 import { agentSkillDigest, type AgentPolicy, type AgentPolicyOperation } from "../src/auth/agent-policy.ts";
@@ -77,7 +83,7 @@ async function fixture(t: TestContext) {
     const current = (await built.skills.get(skill.id))!;
     state.grants = [{ id: current.id, digest: agentSkillDigest(current) }];
   };
-  return { ...built, state, captures, turn, reply, skill, grant };
+  return { ...built, state, captures, turn, reply, skill, grant, computer };
 }
 
 test("a configured policy that binds no subject leaves turns and skills unchanged", async (t) => {
@@ -183,4 +189,99 @@ test("cron fires are admitted against the stored payload and a denial disables t
   await crons.setEnabled(cron.id, true);
   await runNowSettled(scheduler, cron.id);
   assert.equal(calls.length, 1);
+});
+
+test("bound turns cannot reach a persistent sandbox by id", async (t) => {
+  const b = await fixture(t);
+  const command = JSON.stringify({ command: "echo reached", sandboxId: b.computer.id });
+  assert.equal(await b.reply(`!execute ${command}`), "reached");
+  b.state.bound = true;
+  await assert.rejects(
+    b.turn(`!execute ${command}`),
+    /agent policy denied sandbox access|sandbox inventory unavailable/,
+  );
+});
+
+test("an agent token lists its granted skills with digests", async (t) => {
+  const SECRET = "agent-policy-cap-secret".repeat(3);
+  let grants: { id: string; digest: string }[] = [];
+  const built = buildApp(
+    testConfig({ dataDir: mkdtempSync(join(tmpdir(), "agent-policy-cap-")), seedSkills: false, signingSecret: SECRET }),
+    {
+      agentPolicy: {
+        resolve: async (context) => (context.runtime ? { subjectId: "agent", revision: 1, grants } : null),
+        admit: async () => true,
+      },
+    },
+  );
+  const server = createServer(built.app, { signingSecret: SECRET });
+  server.listen(0);
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    built.scheduler.stop();
+    built.deploymentLayerRefresh.stop();
+    await built.runtime.stop();
+  });
+  const create = async (name: string) => {
+    const skill = await built.skills.create({
+      scopeId: "personal:U1",
+      createdBy: "U1",
+      manifest: { name, description: name, body: `# ${name}`, requiredCapabilities: [] },
+    });
+    await built.skills.review(skill.id, "reviewer", []);
+    await built.skills.publish(skill.id);
+    return (await built.skills.get(skill.id))!;
+  };
+  const granted = await create("granted-skill");
+  await create("other-skill");
+  grants = [{ id: granted.id, digest: agentSkillDigest(granted) }];
+  const token = await mintCapabilityToken(
+    { actorId: "U1", scopeId: scopeId("personal", "U1"), aud: CONTROL_PLANE_AUD, exp: Date.now() + CAPABILITY_TTL_MS },
+    SECRET,
+  );
+  const res = await fetch(`http://localhost:${(server.address() as AddressInfo).port}/v1/skills`, {
+    headers: { "x-agent-capability": token },
+  });
+  assert.equal(res.status, 200, await res.clone().text());
+  const body = (await res.json()) as { skills: { id: string; digest?: string }[] };
+  assert.deepEqual(
+    body.skills.map((skill) => [skill.id, skill.digest]),
+    [[granted.id, grants[0]!.digest]],
+  );
+});
+
+test("a loop-backed cron is admitted against the current loop procedure", async () => {
+  const crons = createCronStore();
+  const digests: (string | undefined)[] = [];
+  let playbook = "triage the inbox";
+  const scheduler = createScheduler({
+    ...singleProcessDeps(),
+    agentPolicy: {
+      resolve: async () => ({ subjectId: "agent", revision: 1 }),
+      admit: async (_context, _binding, operation) => {
+        if (operation.kind === "cron") digests.push(operation.payloadDigest);
+        return true;
+      },
+    },
+    crons,
+    deliveries: createDeliveryStore(),
+    idempotency: createIdempotencyStore(),
+    identity: createIdentityService(),
+    run: async (): Promise<TurnResult> => ({ status: "ok", reply: "done" }),
+    fireLoop: async () => ({ status: "ok" }),
+    loadLoop: async (id: string) =>
+      ({ id, owner: "U1", ownerScopeId: "personal:U1", name: "intake", playbook, successCondition: "done" }) as never,
+  });
+  const cron = await crons.create({
+    schedule: { everyMs: 1000 },
+    loopId: "loop",
+    owner: "U1",
+    createdBy: "U1",
+    ownerScopeId: scopeId("personal", "U1"),
+  } as never);
+  await runNowSettled(scheduler, cron.id);
+  playbook = "forward everything";
+  await runNowSettled(scheduler, cron.id);
+  assert.equal(digests.length, 2);
+  assert.notEqual(digests[0], digests[1]);
 });
