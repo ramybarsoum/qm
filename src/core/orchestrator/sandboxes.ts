@@ -268,7 +268,10 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
   };
   const skillsRoot = (r: SkillResolution) =>
     `${SKILLS_ROOT}/${turnSessionDir.split("/").at(-1)}/${hashId([r.skill!.id, String(r.skill!.version)], 16)}`;
-  const laidTrees = new Map<string, { handle: SandboxHandle; root: string; skillId: string; digest?: string }>();
+  const laidTrees = new Map<
+    string,
+    { handle: SandboxHandle; root: string; skillId: string; digest?: string; complete: boolean }
+  >();
   const policyDigest = async (r: SkillResolution): Promise<string | undefined> => {
     if (!agentPolicyContext || !r.skill) return undefined;
     const pack = r.skill.pack;
@@ -277,11 +280,19 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       : null;
     return agentSkillDigest(r.skill, bundle);
   };
-  let skillTreeCleanup: Promise<void> = Promise.resolve();
+  let skillTreeQueue: Promise<void> = Promise.resolve();
+  const serialSkillTrees = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = skillTreeQueue.then(work);
+    skillTreeQueue = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  };
   const dropSkillTrees = (
     keep: (skillId: string, digest?: string) => Promise<boolean> = async () => false,
-  ): Promise<void> => {
-    const run = skillTreeCleanup.then(async () => {
+  ): Promise<void> =>
+    serialSkillTrees(async () => {
       let failure: unknown;
       for (const [key, tree] of laidTrees) {
         if (await keep(tree.skillId, tree.digest).catch(() => false)) continue;
@@ -294,9 +305,6 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       }
       if (failure) throw failure;
     });
-    skillTreeCleanup = run.catch(() => {});
-    return run;
-  };
   const recheckSkillTrees = async (): Promise<void> => {
     if (!agentPolicyContext) return;
     await dropSkillTrees(async (skillId, digest) => {
@@ -311,20 +319,25 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       return !!permitted && (await policyDigest(permitted)) === digest;
     });
   };
-  const materializeSkillTree = async (handle: SandboxHandle, r: SkillResolution): Promise<void> => {
+  const materializeSkillTree = (handle: SandboxHandle, r: SkillResolution): Promise<void> =>
+    agentPolicyContext ? serialSkillTrees(() => laySkillTreeOnce(handle, r)) : laySkillTreeOnce(handle, r);
+  const laySkillTreeOnce = async (handle: SandboxHandle, r: SkillResolution): Promise<void> => {
     const treeKey = `${handle.resourceId ?? handle.id}:${skillDir(skillsRoot(r), r)}`;
-    if (laidTrees.has(treeKey)) return;
+    if (laidTrees.get(treeKey)?.complete) return;
     const start = Date.now();
     try {
       const bundles = r.screenedBundles ?? (deps.skillBundles ? await loadActiveBundles(deps.skillBundles, [r]) : []);
-      await laySkillTree(deps.sandbox, handle, skillsRoot(r), r, bundles);
       const digest = await policyDigest(r);
-      laidTrees.set(treeKey, {
+      const tree = {
         handle,
         root: skillsRoot(r),
         skillId: r.skill!.id,
         ...(digest ? { digest } : {}),
-      });
+        complete: false,
+      };
+      if (agentPolicyContext) laidTrees.set(treeKey, tree);
+      await laySkillTree(deps.sandbox, handle, skillsRoot(r), r, bundles);
+      laidTrees.set(treeKey, { ...tree, complete: true });
     } catch (err) {
       deps.errors?.record(
         {

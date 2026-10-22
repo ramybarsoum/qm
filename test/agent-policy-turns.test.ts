@@ -12,7 +12,12 @@ import { createServer } from "../src/api/server.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
 import { runNowSettled } from "./support/settle.ts";
 import { singleProcessDeps } from "./support/single-process.ts";
-import { agentSkillDigest, type AgentPolicy, type AgentPolicyOperation } from "../src/auth/agent-policy.ts";
+import {
+  agentCronDigest,
+  agentSkillDigest,
+  type AgentPolicy,
+  type AgentPolicyOperation,
+} from "../src/auth/agent-policy.ts";
 import { createScheduler } from "../src/cron/scheduler.ts";
 import { createCronStore } from "../src/cron/cron-store.ts";
 import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
@@ -250,38 +255,126 @@ test("an agent token lists its granted skills with digests", async (t) => {
   );
 });
 
-test("a loop-backed cron is admitted against the current loop procedure", async () => {
+async function loopCronFixture(policy?: AgentPolicy, extra: Record<string, unknown> = {}) {
+  const { createLoopFireService } = await import("../src/loops/loop-fire.ts");
+  const { createLoopStore } = await import("../src/loops/loop-store.ts");
+  const { createLoopItemLedger } = await import("../src/loops/item-ledger.ts");
+  const { createLoopOutputStore } = await import("../src/loops/output-store.ts");
+  const { createShipGrantStore } = await import("../src/loops/ship-grant-store.ts");
+  const loops = createLoopStore();
   const crons = createCronStore();
-  const digests: (string | undefined)[] = [];
-  let playbook = "triage the inbox";
+  const turns: TurnRequest[] = [];
+  const trigger = {
+    deliveries: { enqueue: async () => ({ id: "d1" }) } as never,
+    idempotency: createIdempotencyStore(),
+    identity: { refresh: async () => {}, classify: () => ({ type: "internal" as const }) } as never,
+    run: async (req: TurnRequest): Promise<TurnResult> => {
+      turns.push(req);
+      return { status: "ok", reply: "[]", sessionId: `s${turns.length}` };
+    },
+  };
+  const service = createLoopFireService({
+    crons,
+    triageEnabledFor: async () => true,
+    loops,
+    items: createLoopItemLedger(),
+    outputs: createLoopOutputStore(),
+    grants: createShipGrantStore(),
+    trigger,
+  } as never);
+  const owner = { owner: "U1", createdBy: "U1", ownerScopeId: scopeId("personal", "U1") };
+  const { loop } = await loops.create({
+    ...owner,
+    name: "intake",
+    playbook: "APPROVED_PLAYBOOK",
+    successCondition: "done",
+    shipActions: [],
+  } as never);
+  const cron = await crons.create({ ...owner, schedule: { everyMs: 1000 }, loopId: loop.id } as never);
+  await loops.update(loop.id, { cronId: cron.id });
   const scheduler = createScheduler({
     ...singleProcessDeps(),
-    agentPolicy: {
-      resolve: async () => ({ subjectId: "agent", revision: 1 }),
-      admit: async (_context, _binding, operation) => {
-        if (operation.kind === "cron") digests.push(operation.payloadDigest);
-        return true;
-      },
-    },
+    ...(policy ? { agentPolicy: policy } : {}),
     crons,
     deliveries: createDeliveryStore(),
     idempotency: createIdempotencyStore(),
     identity: createIdentityService(),
     run: async (): Promise<TurnResult> => ({ status: "ok", reply: "done" }),
-    fireLoop: async () => ({ status: "ok" }),
-    loadLoop: async (id: string) =>
-      ({ id, owner: "U1", ownerScopeId: "personal:U1", name: "intake", playbook, successCondition: "done" }) as never,
-  });
-  const cron = await crons.create({
-    schedule: { everyMs: 1000 },
-    loopId: "loop",
-    owner: "U1",
-    createdBy: "U1",
-    ownerScopeId: scopeId("personal", "U1"),
+    fireLoop: (loopId: string, fireKey: string, cronId: string, options?: never) =>
+      service.fire(loopId, fireKey, cronId, options),
+    ...extra,
   } as never);
-  await runNowSettled(scheduler, cron.id);
-  playbook = "forward everything";
-  await runNowSettled(scheduler, cron.id);
-  assert.equal(digests.length, 2);
-  assert.notEqual(digests[0], digests[1]);
+  const approved = agentCronDigest((await crons.get(cron.id))!, await loops.get(loop.id));
+  return { loops, crons, cron, loop, scheduler, turns, approved };
+}
+
+function pinnedPolicy(approved: () => string, onAdmit: () => Promise<void> = async () => {}): AgentPolicy {
+  return {
+    resolve: async () => ({ subjectId: "agent", revision: 1 }),
+    admit: async (_context, _binding, operation) => {
+      if (operation.kind !== "cron") return true;
+      await onAdmit();
+      return operation.payloadDigest === approved();
+    },
+  };
+}
+
+test("a loop edited after approval is refused before it runs", async () => {
+  let approved = "";
+  const f = await loopCronFixture(pinnedPolicy(() => approved));
+  approved = f.approved;
+  await f.loops.editPlaybook(f.loop.id, { playbook: "CHANGED_PLAYBOOK", by: "U1" });
+  await runNowSettled(f.scheduler, f.cron.id);
+  assert.equal(f.turns.length, 0);
+  assert.equal((await f.crons.listFires(f.cron.id)).runs[0]?.status, "refused");
+  assert.equal((await f.crons.get(f.cron.id))?.enabled, false);
+});
+
+test("a loop edited during admission runs the admitted procedure, not the edit", async () => {
+  let approved = "";
+  let edit: () => Promise<void> = async () => {};
+  const f = await loopCronFixture(
+    pinnedPolicy(
+      () => approved,
+      () => edit(),
+    ),
+  );
+  approved = f.approved;
+  edit = async () => {
+    edit = async () => {};
+    await f.loops.editPlaybook(f.loop.id, { playbook: "CHANGED_PLAYBOOK", by: "U1" });
+  };
+  await runNowSettled(f.scheduler, f.cron.id);
+  assert.ok(f.turns.length > 0);
+  for (const turn of f.turns) assert.doesNotMatch(turn.text ?? "", /CHANGED_PLAYBOOK/);
+});
+
+test("a policy outage settles the cron fire instead of leaving it running", async () => {
+  const f = await loopCronFixture({
+    resolve: async () => {
+      throw new Error("policy offline");
+    },
+    admit: async () => true,
+  });
+  await runNowSettled(f.scheduler, f.cron.id);
+  const [last] = (await f.crons.listFires(f.cron.id)).runs;
+  assert.equal(last?.status, "failed");
+  assert.match(last?.note ?? "", /policy offline/);
+  assert.equal(f.turns.length, 0);
+  const again = await f.scheduler.runNow(f.cron.id);
+  assert.equal(again.started, true);
+  if (again.started) await again.settled;
+});
+
+test("without a policy a loop-backed cron fires without admission or extra loop lookups", async () => {
+  const seen: unknown[] = [];
+  const f = await loopCronFixture(undefined, {
+    fireLoop: async (_loopId: string, _fireKey: string, _cronId: string, options?: unknown) => {
+      seen.push(options);
+      return { status: "ok" };
+    },
+  });
+  await runNowSettled(f.scheduler, f.cron.id);
+  assert.deepEqual(seen, [undefined]);
+  assert.equal((await f.crons.listFires(f.cron.id)).runs[0]?.status, "ok");
 });

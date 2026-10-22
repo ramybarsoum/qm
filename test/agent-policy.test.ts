@@ -271,10 +271,13 @@ test("cron admission binds the loop procedure a loop-backed cron runs", () => {
   assert.notEqual(agentCronDigest(cron as never, null), digest);
 });
 
-async function boundSkillSandbox() {
+async function boundSkillSandbox(options: { lay?: boolean } = {}) {
   const { createTurnSandboxes } = await import("../src/core/orchestrator/sandboxes.ts");
   const { skill, store } = await fixture();
-  skill.manifest.files = [{ path: "references/example.txt", content: "ASSET" }];
+  skill.manifest.files = [
+    { path: "references/example.txt", content: "ASSET" },
+    { path: "references/second.txt", content: "SECOND" },
+  ];
   await store.update(skill.id, skill.manifest);
   await store.review(skill.id, "owner", []);
   await store.publish(skill.id);
@@ -283,11 +286,14 @@ async function boundSkillSandbox() {
   const provider = policy(grants);
   const disk = new Map<string, string>();
   const removal = { gate: Promise.resolve(), failures: 0, calls: 0 };
+  const write = { gate: Promise.resolve(), gateOn: "", failOn: "" };
   const sandbox = {
     provision: async () => ({ id: "box", backend: "fake", rootDir: "/w" }),
     listDir: async () => [],
     writeFile: async (_h: unknown, path: string, content: string) => {
+      if (write.failOn && path.endsWith(write.failOn)) throw new Error("write failed");
       disk.set(path, content);
+      if (write.gateOn && path.endsWith(write.gateOn)) await write.gate;
     },
     readFile: async (_h: unknown, path: string) => disk.get(path) ?? null,
     removeDir: async (_h: unknown, path: string) => {
@@ -325,11 +331,13 @@ async function boundSkillSandbox() {
     agentPolicyContext: context,
     emitGapWork: () => {},
   } as unknown as Parameters<typeof createTurnSandboxes>[0]);
-  const used = await boxes.useSkill("allowed", "references/example.txt");
-  assert.equal(used.content, "ASSET");
-  const assetPaths = () => [...disk.keys()].filter((key) => key.endsWith("references/example.txt"));
-  assert.equal(assetPaths().length, 1);
-  return { boxes, grants, removal, assetPaths };
+  const assetPaths = () => [...disk.keys()].filter((key) => key.includes("references/"));
+  if (options.lay !== false) {
+    const used = await boxes.useSkill("allowed", "references/example.txt");
+    assert.equal(used.content, "ASSET");
+    assert.equal(assetPaths().length, 2);
+  }
+  return { boxes, grants, removal, write, assetPaths };
 }
 
 test("a concurrent tool call waits until a revoked skill tree is actually deleted", async () => {
@@ -345,7 +353,7 @@ test("a concurrent tool call waits until a revoked skill tree is actually delete
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(secondDone, false);
-  assert.equal(assetPaths().length, 1);
+  assert.equal(assetPaths().length, 2);
   release();
   await Promise.all([first, second]);
   assert.equal(assetPaths().length, 0);
@@ -356,7 +364,7 @@ test("a failed skill tree deletion fails the call and is retried on the next one
   grants.length = 0;
   removal.failures = 1;
   await assert.rejects(boxes.recheckSkillTrees(), /remove failed/);
-  assert.equal(assetPaths().length, 1);
+  assert.equal(assetPaths().length, 2);
   await boxes.recheckSkillTrees();
   assert.equal(assetPaths().length, 0);
   assert.equal(removal.calls, 2);
@@ -366,7 +374,37 @@ test("a policy failure that drops all trees retries a failed deletion", async ()
   const { boxes, removal, assetPaths } = await boundSkillSandbox();
   removal.failures = 1;
   await assert.rejects(boxes.dropSkillTrees(), /remove failed/);
-  assert.equal(assetPaths().length, 1);
+  assert.equal(assetPaths().length, 2);
   await boxes.dropSkillTrees();
   assert.equal(assetPaths().length, 0);
+});
+
+test("a recheck during an in-flight skill tree write leaves no revoked file readable", async () => {
+  const { boxes, grants, write, assetPaths } = await boundSkillSandbox({ lay: false });
+  let release!: () => void;
+  write.gate = new Promise((resolve) => (release = resolve));
+  write.gateOn = "references/example.txt";
+  const laying = boxes.useSkill("allowed", "references/example.txt");
+  while (assetPaths().length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  grants.length = 0;
+  let visibleWhenRechecked: string[] | undefined;
+  const recheck = boxes.recheckSkillTrees().then(() => {
+    visibleWhenRechecked = assetPaths();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  release();
+  await Promise.allSettled([laying, recheck]);
+  assert.deepEqual(visibleWhenRechecked, []);
+  assert.deepEqual(assetPaths(), []);
+});
+
+test("a failed skill tree write leaves no files behind after revocation", async () => {
+  const { boxes, grants, write, assetPaths } = await boundSkillSandbox({ lay: false });
+  write.failOn = "references/second.txt";
+  await assert.rejects(boxes.useSkill("allowed", "references/example.txt"), /write failed/);
+  grants.length = 0;
+  await boxes.recheckSkillTrees();
+  assert.deepEqual(assetPaths(), []);
+  write.failOn = "";
+  grants.length = 0;
 });

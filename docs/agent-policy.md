@@ -37,9 +37,10 @@ Operations are:
 - `{ kind: "turn" }` before an interactive, webhook, monitor or loop turn runs.
 - `{ kind: "cron", payloadDigest }` before a cron fires. The digest covers the stored task,
   title, owner, scope, destination, schedule, runtime and unattended grants, and for a
-  loop-backed cron the loop's current procedure (playbook, success condition and checks,
-  sources, ship actions, caps, governor, triage, destination), so an approval can be pinned
-  to the exact payload.
+  loop-backed cron the loop's procedure (playbook, success condition and checks, sources,
+  ship actions, caps, governor, triage, destination), checked against the exact snapshot the
+  loop service runs and again before an auto-ship, so an approval can be pinned to the exact
+  payload. A policy error records a `failed` fire.
 - `{ kind: "skill", resource: { id, digest } }` for each skill a bound subject could see.
 - `{ kind: "tool", name, input }` before every tool call of a bound turn. Methods on nested
   tool namespaces are named with a dotted path, for example `admin.call` or
@@ -60,6 +61,7 @@ Errors thrown by `resolve` or `admit` propagate, so an unavailable policy fails 
   (`sandbox_id`), the sandbox inventory, and cross-channel reach are unavailable.
 - Every tool call re-resolved and admitted. Before each call, materialized skill trees
   whose grant or content no longer matches are removed; on a denial or policy error all
-  of them are removed. Removal is serialized, a tree is only forgotten once it is deleted,
-  and a failed deletion fails the call and is retried on the next one.
+  of them are removed. Skill-tree writes and removals are serialized, a tree is tracked
+  before its files are written and forgotten only once it is deleted, and a failed
+  deletion fails the call and is retried on the next one.
 - A denied cron fire is recorded as `refused` and the cron is disabled.

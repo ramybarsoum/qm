@@ -79,8 +79,13 @@ type LoopFollowUpOptions = Pick<TurnRequest, "model" | "harness" | "thinkingLeve
 
 type StageOptions = LoopFollowUpOptions & Pick<TurnRequest, "readOnly">;
 
+interface LoopFireOptions {
+  enumerate?: boolean;
+  admit?: (loop: Loop) => Promise<boolean>;
+}
+
 export interface LoopFireService {
-  fire(loopId: string, fireKey: string, cronId?: string, options?: { enumerate?: boolean }): Promise<LoopFireResult>;
+  fire(loopId: string, fireKey: string, cronId?: string, options?: LoopFireOptions): Promise<LoopFireResult>;
   followUp(
     loop: Loop,
     item: LoopItem,
@@ -673,7 +678,7 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     loopId: string,
     fireKey: string,
     cronId?: string,
-    options?: { enumerate?: boolean },
+    options?: LoopFireOptions,
   ): Promise<LoopFireResult> {
     try {
       const work = () => fireAdmitted(loopId, fireKey, cronId, options);
@@ -688,10 +693,12 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     loopId: string,
     fireKey: string,
     cronId?: string,
-    options?: { enumerate?: boolean },
+    options?: LoopFireOptions,
   ): Promise<LoopFireResult> {
     const loop = await deps.loops.get(loopId);
     if (!loop) return { status: "failed", note: "loop not found" };
+    if (options?.admit && !(await options.admit(structuredClone(loop))))
+      return { status: "refused", note: "agent policy denied cron admission" };
     try {
       await boundLoopCron(loop, deps.crons, cronId);
     } catch (e) {
@@ -792,6 +799,7 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
           authorizeAutoShip: async (output) => {
             const currentLoop = await deps.loops.get(loop.id);
             if (!currentLoop || !isRunnable(currentLoop)) return null;
+            if (options?.admit && !(await options.admit(structuredClone(currentLoop)))) return null;
             const currentGrants = await deps.grants.byLoop(loop.id);
             return decideShip(currentLoop, outputCandidate(output), currentGrants).outcome === "auto"
               ? currentLoop

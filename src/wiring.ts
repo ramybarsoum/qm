@@ -2611,8 +2611,7 @@ export function buildApp(
     currentScopeMembers,
     sessions,
     resolveRecipient,
-    loadLoop: (loopId) => loopStore.get(loopId),
-    fireLoop: (loopId, fireKey, cronId) => loopFire.fire(loopId, fireKey, cronId),
+    fireLoop: (loopId, fireKey, cronId, options) => loopFire.fire(loopId, fireKey, cronId, options),
     ...(config.databaseUrl
       ? { jobQueue: createPgBossCronQueue(config.databaseUrl, undefined, config.cronFireConcurrency) }
       : {}),
