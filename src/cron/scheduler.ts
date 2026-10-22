@@ -1,3 +1,4 @@
+import { agentCronDigest, admitAgentOperation, type AgentPolicy } from "../auth/agent-policy.ts";
 import { cronTriggerAuthority } from "./authority.ts";
 import { WorkAdmissionClosed, type AdmittedWork } from "../util/admitted-work.ts";
 import { randomUUID } from "node:crypto";
@@ -63,6 +64,7 @@ export interface Scheduler {
 }
 
 export interface SchedulerDeps {
+  agentPolicy?: AgentPolicy;
   admittedWork?: AdmittedWork;
   advisoryLock: import("../persistence/advisory-lock.ts").AdvisoryLock;
   crons: CronStore;
@@ -233,6 +235,31 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
   async function fireEnabled(cron: Cron, t: number, fireKey: string, scheduledAt?: number): Promise<FireResult> {
     const threadRef = cronFireThreadRef(cron.id, fireKey);
+    if (
+      !(await admitAgentOperation(
+        deps.agentPolicy,
+        {
+          runtime: true,
+          principalId: cron.owner,
+          scopeId: cron.ownerScopeId,
+          threadRef,
+          trigger: { id: cron.id, fireKey },
+        },
+        { kind: "cron", payloadDigest: agentCronDigest(cron) },
+      ))
+    ) {
+      await deps.crons.recordFire(cron.id, {
+        fireKey,
+        threadRef,
+        firedAt: t,
+        endedAt: now(),
+        ...(scheduledAt !== undefined ? { scheduledAt } : {}),
+        status: "refused",
+        note: "agent policy denied cron admission",
+      });
+      await deps.crons.setEnabled(cron.id, false);
+      return { authzFailed: true };
+    }
     const runningEntry: CronFireLogEntry = {
       fireKey,
       threadRef,

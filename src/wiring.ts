@@ -1,3 +1,4 @@
+import { loadAgentPolicyModule, type AgentPolicy } from "./auth/agent-policy.ts";
 import type { MemoryEmbedder } from "./model/embeddings.ts";
 import { nonDeploymentCredential, withDeploymentCredentials } from "./credentials/deployment-credentials.ts";
 import { resolveEmbeddingModel } from "./model/pi-models.ts";
@@ -557,6 +558,7 @@ const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
 export function buildApp(
   config: Config,
   overrides: {
+    agentPolicy?: AgentPolicy;
     securityScreener?: SecurityScreener;
     decisionBackend?: DecisionBackend;
     credentialBrokers?: Record<string, AwsRoleBroker>;
@@ -2024,7 +2026,11 @@ export function buildApp(
     },
   });
   const uiState = artifactMap<PersistedUiState>("web_ui_state");
+  const policyModule = config.layerEnv?.AGENT_POLICY_MODULE;
+  const agentPolicy =
+    overrides.agentPolicy ?? (policyModule ? loadAgentPolicyModule(resolve(policyModule)) : undefined);
   const orchestratorDeps: OrchestratorDeps = {
+    ...(agentPolicy ? { agentPolicy } : {}),
     installSharedCanvas: async (actorId, fileId, where) => {
       const canvas = await installSharedCanvas(uiState, actorId, await app.openFileForViewer(fileId, actorId));
       if (typeof canvas === "string") return canvas;
@@ -2237,6 +2243,7 @@ export function buildApp(
         })
     : undefined;
   const app = createApp({
+    ...(agentPolicy ? { agentPolicy } : {}),
     teams,
     externalSlackPolicies: config.externalSlackPolicies,
     admittedWork,
@@ -2588,6 +2595,7 @@ export function buildApp(
     scheduler: { notifyChanged: (id) => scheduler.notifyChanged(id) },
   });
   const scheduler = createScheduler({
+    ...(agentPolicy ? { agentPolicy } : {}),
     admittedWork,
     skipFire: async (cron) => (await memoryTidy.skipFire(cron)) ?? suggestedActivities.skipFire(cron),
     deleteCron: (id) => app.deleteCron(id),
