@@ -255,7 +255,12 @@ test("an agent token lists its granted skills with digests", async (t) => {
   );
 });
 
-async function loopCronFixture(policy?: AgentPolicy, extra: Record<string, unknown> = {}) {
+async function loopCronFixture(
+  policy?: AgentPolicy,
+  extra: Record<string, unknown> = {},
+  loopInput: Record<string, unknown> = {},
+  reply: (req: TurnRequest) => string = () => "[]",
+) {
   const { createLoopFireService } = await import("../src/loops/loop-fire.ts");
   const { createLoopStore } = await import("../src/loops/loop-store.ts");
   const { createLoopItemLedger } = await import("../src/loops/item-ledger.ts");
@@ -270,7 +275,7 @@ async function loopCronFixture(policy?: AgentPolicy, extra: Record<string, unkno
     identity: { refresh: async () => {}, classify: () => ({ type: "internal" as const }) } as never,
     run: async (req: TurnRequest): Promise<TurnResult> => {
       turns.push(req);
-      return { status: "ok", reply: "[]", sessionId: `s${turns.length}` };
+      return { status: "ok", reply: reply(req), sessionId: `s${turns.length}` };
     },
   };
   const service = createLoopFireService({
@@ -289,6 +294,7 @@ async function loopCronFixture(policy?: AgentPolicy, extra: Record<string, unkno
     playbook: "APPROVED_PLAYBOOK",
     successCondition: "done",
     shipActions: [],
+    ...loopInput,
   } as never);
   const cron = await crons.create({ ...owner, schedule: { everyMs: 1000 }, loopId: loop.id } as never);
   await loops.update(loop.id, { cronId: cron.id });
@@ -377,4 +383,54 @@ test("without a policy a loop-backed cron fires without admission or extra loop 
   await runNowSettled(f.scheduler, f.cron.id);
   assert.deepEqual(seen, [undefined]);
   assert.equal((await f.crons.listFires(f.cron.id)).runs[0]?.status, "ok");
+});
+
+test("authority added to a cron during admission does not reach the loop turn", async () => {
+  let approved = "";
+  let edit: () => Promise<void> = async () => {};
+  const f = await loopCronFixture(
+    pinnedPolicy(
+      () => approved,
+      () => edit(),
+    ),
+  );
+  approved = f.approved;
+  edit = async () => {
+    edit = async () => {};
+    await f.crons.update(f.cron.id, { unattendedGrants: ["admin.sessions.read"] } as never);
+  };
+  await runNowSettled(f.scheduler, f.cron.id);
+  assert.ok(f.turns.length > 0);
+  for (const turn of f.turns) assert.deepEqual(turn.unattendedGrants ?? [], []);
+});
+
+test("an auto-ship runs on the admitted loop, not one edited mid-fire", async () => {
+  let midFire: () => Promise<void> = async () => {};
+  const reply = (req: TurnRequest) => {
+    const text = req.text ?? "";
+    if (text.startsWith("[Loop intake]")) return '```json\n[{"sourceKey": "K1", "sourceSummary": "one"}]\n```';
+    if (text.startsWith("[Loop work]")) {
+      void midFire();
+      return '```json\n{"outputs": [{"shipAction": "open_pr", "title": "Fix", "externalRef": "https://example.com/1"}]}\n```';
+    }
+    if (text.startsWith("[Loop judge]")) return '```json\n{"outcome": "met", "reason": "ok"}\n```';
+    return "shipped";
+  };
+  let approved = "";
+  const f = await loopCronFixture(
+    pinnedPolicy(() => approved),
+    {},
+    { name: "APPROVED_LOOP", shipActions: [{ action: "open_pr", gate: "auto" }] },
+    reply,
+  );
+  approved = f.approved;
+  midFire = async () => {
+    midFire = async () => {};
+    await f.loops.update(f.loop.id, { name: "UNAPPROVED_SHIP_NAME" });
+  };
+  await runNowSettled(f.scheduler, f.cron.id);
+  const ship = f.turns.find((turn) => (turn.text ?? "").startsWith("[Loop ship]"));
+  assert.ok(ship, "the admitted auto-ship ran");
+  assert.match(ship.text ?? "", /APPROVED_LOOP/);
+  assert.doesNotMatch(ship.text ?? "", /UNAPPROVED_SHIP_NAME/);
 });

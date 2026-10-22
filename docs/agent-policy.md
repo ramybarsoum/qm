@@ -38,9 +38,11 @@ Operations are:
 - `{ kind: "cron", payloadDigest }` before a cron fires. The digest covers the stored task,
   title, owner, scope, destination, schedule, runtime and unattended grants, and for a
   loop-backed cron the loop's procedure (playbook, success condition and checks, sources,
-  ship actions, caps, governor, triage, destination), checked against the exact snapshot the
-  loop service runs and again before an auto-ship, so an approval can be pinned to the exact
-  payload. A policy error records a `failed` fire.
+  ship actions, caps, governor, triage, destination) and its ship grants. The loop service
+  takes one frozen snapshot of loop, cron and ship grants, admits it, and runs every stage,
+  triage and auto-ship from it. Later reads can only narrow it (a revoked grant or a paused
+  loop), never widen it, so an approval is pinned to the exact payload. A policy error
+  records a `failed` fire.
 - `{ kind: "skill", resource: { id, digest } }` for each skill a bound subject could see.
 - `{ kind: "tool", name, input }` before every tool call of a bound turn. Methods on nested
   tool namespaces are named with a dotted path, for example `admin.call` or
@@ -61,7 +63,8 @@ Errors thrown by `resolve` or `admit` propagate, so an unavailable policy fails 
   (`sandbox_id`), the sandbox inventory, and cross-channel reach are unavailable.
 - Every tool call re-resolved and admitted. Before each call, materialized skill trees
   whose grant or content no longer matches are removed; on a denial or policy error all
-  of them are removed. Skill-tree writes and removals are serialized, a tree is tracked
-  before its files are written and forgotten only once it is deleted, and a failed
-  deletion fails the call and is retried on the next one.
+  of them are removed. A skill grant is resolved after the sandbox is provisioned, in the
+  same queued critical section as its file writes; writes and removals share that queue, a
+  tree is tracked before its files are written and forgotten only once it is deleted, and a
+  failed deletion fails the call and is retried on the next one.
 - A denied cron fire is recorded as `refused` and the cron is disabled.

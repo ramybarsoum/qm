@@ -286,9 +286,12 @@ async function boundSkillSandbox(options: { lay?: boolean } = {}) {
   const provider = policy(grants);
   const disk = new Map<string, string>();
   const removal = { gate: Promise.resolve(), failures: 0, calls: 0 };
-  const write = { gate: Promise.resolve(), gateOn: "", failOn: "" };
+  const write = { gate: Promise.resolve(), gateOn: "", failOn: "", provisionGate: Promise.resolve() };
   const sandbox = {
-    provision: async () => ({ id: "box", backend: "fake", rootDir: "/w" }),
+    provision: async () => {
+      await write.provisionGate;
+      return { id: "box", backend: "fake", rootDir: "/w" };
+    },
     listDir: async () => [],
     writeFile: async (_h: unknown, path: string, content: string) => {
       if (write.failOn && path.endsWith(write.failOn)) throw new Error("write failed");
@@ -407,4 +410,18 @@ test("a failed skill tree write leaves no files behind after revocation", async 
   assert.deepEqual(assetPaths(), []);
   write.failOn = "";
   grants.length = 0;
+});
+
+test("a grant revoked while the sandbox provisions is never written", async () => {
+  const { boxes, grants, write, assetPaths } = await boundSkillSandbox({ lay: false });
+  let release!: () => void;
+  write.provisionGate = new Promise((resolve) => (release = resolve));
+  const using = boxes.useSkill("allowed", "references/example.txt");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  grants.length = 0;
+  await boxes.recheckSkillTrees();
+  release();
+  const used = await using;
+  assert.equal(used.content, null);
+  assert.deepEqual(assetPaths(), []);
 });

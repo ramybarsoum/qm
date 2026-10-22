@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import type { Cron, Loop } from "../types.ts";
+import type { Cron, Loop, ShipGrant } from "../types.ts";
 import type { Skill, SkillResolution } from "../skills/skill-store.ts";
 import type { SkillBundle, SkillBundleStore } from "../skills/skill-bundle-store.ts";
 
@@ -186,7 +186,7 @@ export function guardAgentTools<T extends object>(
   return guard(tools, "") as AgentGuardedTools<T>;
 }
 
-function loopProcedure(cron: Cron, loop: Loop | null | undefined): unknown {
+function loopProcedure(cron: Cron, loop: Loop | null | undefined, grants: readonly ShipGrant[]): unknown {
   if (!cron.loopId) return null;
   if (!loop) return "missing-loop";
   return {
@@ -205,10 +205,11 @@ function loopProcedure(cron: Cron, loop: Loop | null | undefined): unknown {
     governor: loop.governor ?? null,
     triage: loop.triage ?? null,
     destination: loop.destination ?? null,
+    grants,
   };
 }
 
-export function agentCronDigest(cron: Cron, loop?: Loop | null): string {
+export function agentCronDigest(cron: Cron, loop?: Loop | null, grants: readonly ShipGrant[] = []): string {
   const canonical = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(canonical);
     if (value !== null && typeof value === "object")
@@ -235,7 +236,7 @@ export function agentCronDigest(cron: Cron, loop?: Loop | null): string {
           cron.schedule,
           cron.runtime ?? null,
           cron.unattendedGrants ?? [],
-          loopProcedure(cron, loop),
+          loopProcedure(cron, loop, grants),
         ]),
       ),
     )

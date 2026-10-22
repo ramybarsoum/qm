@@ -7,6 +7,7 @@ import {
   type CronFireLogEntry,
   type CronFireNote,
   type Loop,
+  type ShipGrant,
   type TurnRequest,
   type TurnResult,
 } from "../types.ts";
@@ -29,6 +30,8 @@ import { sleep } from "../util/async.ts";
 
 const TICK_LEASE_KEY = "cron:scheduler:tick";
 const CRON_POLICY_DENIED = "agent policy denied cron admission";
+
+type LoopFireSnapshot = { loop: Loop; cron: Cron | null; grants: ShipGrant[] };
 const CRON_FIRE_REPLY_MAX_CHARS = 2000;
 const STRANDED_SWEEP_INTERVAL_MS = 10 * 60_000;
 const FIRE_GC_INTERVAL_MS = 6 * 60 * 60_000;
@@ -99,7 +102,7 @@ export interface SchedulerDeps {
     loopId: string,
     fireKey: string,
     cronId: string,
-    options?: { admit: (loop: Loop) => Promise<boolean> },
+    options?: { admit: (snapshot: LoopFireSnapshot) => Promise<boolean> },
   ) => Promise<{ status?: TurnResult["status"]; note?: string }>;
 }
 
@@ -258,7 +261,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       await deps.crons.setEnabled(cron.id, false);
       return { authzFailed: true };
     };
-    const admitCron = (loop?: Loop) =>
+    const admitCron = (snapshot?: LoopFireSnapshot) =>
       admitAgentOperation(
         deps.agentPolicy,
         {
@@ -268,7 +271,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           threadRef,
           trigger: { id: cron.id, fireKey },
         },
-        { kind: "cron", payloadDigest: agentCronDigest(cron, loop) },
+        {
+          kind: "cron",
+          payloadDigest: snapshot
+            ? agentCronDigest(snapshot.cron ?? cron, snapshot.loop, snapshot.grants)
+            : agentCronDigest(cron),
+        },
       );
     if (deps.agentPolicy && !cron.loopId) {
       let admitted: boolean;
@@ -293,8 +301,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         note: "loop service unavailable",
       };
       let loopDenied = false;
-      const admitLoop = async (loop: Loop) => {
-        const admitted = await admitCron(loop);
+      const admitLoop = async (snapshot: LoopFireSnapshot) => {
+        const admitted = await admitCron(snapshot);
         if (!admitted) loopDenied = true;
         return admitted;
       };
@@ -309,21 +317,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         } catch (e) {
           result = { status: "failed", note: errMessage(e) };
         }
-      if (loopDenied) {
-        await deps.crons.setEnabled(cron.id, false);
-        if (result.status === "refused") {
-          await deps.crons.recordFire(cron.id, {
-            fireKey,
-            threadRef,
-            firedAt: t,
-            endedAt: now(),
-            ...(scheduledAt !== undefined ? { scheduledAt } : {}),
-            status: "refused",
-            note: CRON_POLICY_DENIED,
-          });
-          return { authzFailed: true };
-        }
-      }
+      if (loopDenied) await deps.crons.setEnabled(cron.id, false);
       await deps.crons.recordFire(cron.id, {
         fireKey,
         threadRef,
