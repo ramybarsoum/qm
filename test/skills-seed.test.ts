@@ -1,4 +1,5 @@
 import "./support/auto-fake-sprites.ts";
+import { apacheLicenseOffenders } from "./support/license-policy.ts";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -62,7 +63,7 @@ test("installSeedSkills publishes the repository starter catalog into org scope"
   assert.deepEqual(rerun.updated, []);
 });
 
-test("every licence shipped with a seed skill is MIT, and no tracked source carries Apache licence text", () => {
+test("seed licences stay MIT; core rejects Apache text; declared layer packages preserve their own licences", () => {
   const seedDir = "skills-seed";
   const licences: string[] = [];
   const walk = (dir: string): void => {
@@ -80,17 +81,8 @@ test("every licence shipped with a seed skill is MIT, and no tracked source carr
   }
 
   const tracked = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
-  const offenders = tracked.filter((path) => {
-    if (path.endsWith("package-lock.json") || path === "test/skills-seed.test.ts") return false;
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8");
-    } catch {
-      return false;
-    }
-    return text.includes(["Apache", " License"].join(""));
-  });
-  assert.deepEqual(offenders, [], "Apache-licensed material must not be vendored into this MIT repository");
+  const offenders = apacheLicenseOffenders(process.cwd(), tracked);
+  assert.deepEqual(offenders, [], "Apache text requires a validated separate layer-package boundary");
 });
 
 function writeSeedSkill(dir: string, name: string, description: string, body: string): void {

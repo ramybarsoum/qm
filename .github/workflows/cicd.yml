@@ -251,6 +251,17 @@ jobs:
           npm ci
           npm ci --prefix plugins/web-ui
           npm ci --prefix desktop --ignore-scripts
+      - name: Install Helm for layer chart validation
+        if: needs.reuse.outputs.reusable != 'true'
+        run: |
+          tool_dir="$(mktemp -d)"
+          curl -fsSL https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz -o "$tool_dir/helm.tar.gz"
+          printf '%s  %s\n' 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb "$tool_dir/helm.tar.gz" | sha256sum --check --status
+          tar -xzf "$tool_dir/helm.tar.gz" -C "$tool_dir"
+          sudo install "$tool_dir/linux-amd64/helm" /usr/local/bin/helm
+      - name: Layer chart formatting fixtures
+        if: needs.reuse.outputs.reusable != 'true'
+        run: node --test test/repository-format-routing.test.mjs
       - name: Formatting
         if: needs.reuse.outputs.reusable != 'true'
         run: npm run format:check
