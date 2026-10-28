@@ -13,11 +13,11 @@ import {
   symlinkSync,
   chmodSync,
 } from "node:fs";
-import { dirname, join, delimiter } from "node:path";
+import { dirname, join, delimiter, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 
 export async function formatCases(format, sandbox, helm, run) {
   const fixture = () => {
@@ -516,6 +516,19 @@ async function actualLintStagedFixture(source, sandbox, toolCli, prettierRoot, h
     GIT_TERMINAL_PROMPT: "0",
     HELM: helm,
   };
+  delete env.NODE_OPTIONS;
+  delete env.NODE_PATH;
+  mkdirSync(join(root, "node_modules"));
+  for (const name of ["prettier", "minimatch"]) {
+    const entry = fileURLToPath(import.meta.resolve(name));
+    const descriptor = createRequire(entry).resolve(name + "/package.json");
+    const directory = fs.realpathSync(dirname(descriptor));
+    assert.equal(JSON.parse(readFileSync(descriptor, "utf8")).name, name);
+    assert.ok(fs.realpathSync(entry).startsWith(directory + sep));
+    const borrowed = join(root, "node_modules", name);
+    symlinkSync(directory, borrowed, "dir");
+    assert.equal(fs.realpathSync(borrowed), directory);
+  }
   const git = (args, options = {}) =>
     execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env, encoding: "utf8", ...options });
   const put = (path, text) => {
