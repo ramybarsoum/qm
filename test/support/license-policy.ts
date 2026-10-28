@@ -36,34 +36,41 @@ export function apacheLicenseOffenders(root: string, tracked: string[]): string[
     return readFileSync(physical);
   };
   for (const manifest of tracked.filter((path) => /^deploy\/layers\/[^/]+\/LICENSE-PACKAGES\.json$/.test(path))) {
-    const declared: unknown = JSON.parse(readTracked(manifest, true).toString("utf8"));
-    assert.ok(declared && typeof declared === "object" && !Array.isArray(declared));
-    const data = declared as { version: unknown; packages: unknown };
-    assert.deepEqual(Object.keys(data).sort(), ["packages", "version"]);
-    assert.equal(data.version, 1);
-    assert.ok(Array.isArray(data.packages));
-    for (const item of data.packages) {
-      assert.ok(item && typeof item === "object" && !Array.isArray(item));
-      assert.deepEqual(Object.keys(item).sort(), ["licenseFile", "root", "sha256", "spdx"]);
-      assert.ok(safeRelative(item.root) && safeRelative(item.licenseFile));
-      assert.ok(item.spdx === "MIT" || item.spdx === "Apache-2.0");
-      assert.equal(typeof item.sha256, "string");
-      assert.match(item.sha256, /^[a-f0-9]{64}$/);
-      const prefix = `${dirname(manifest)}/${item.root}/`;
-      assert.ok(
-        packages.every((other) => !prefix.startsWith(other.prefix) && !other.prefix.startsWith(prefix)),
-        "license package boundaries must not overlap",
-      );
-      const license = readTracked(prefix + item.licenseFile, true);
-      assert.equal(createHash("sha256").update(license).digest("hex"), item.sha256);
-      const text = license.toString("utf8");
-      if (item.spdx === "MIT") {
-        assert.match(text, /MIT License/);
-        assert.ok(!text.includes(["Apache", " License"].join("")));
-      } else {
-        assert.match(text, /Apache\s+License[\s\S]*Version\s+2\.0/);
+    let context = manifest;
+    try {
+      const declared: unknown = JSON.parse(readTracked(manifest, true).toString("utf8"));
+      assert.ok(declared && typeof declared === "object" && !Array.isArray(declared));
+      const data = declared as { version: unknown; packages: unknown };
+      assert.deepEqual(Object.keys(data).sort(), ["packages", "version"]);
+      assert.equal(data.version, 1);
+      assert.ok(Array.isArray(data.packages));
+      for (const [index, item] of data.packages.entries()) {
+        context = `${manifest}: package[${index}]`;
+        assert.ok(item && typeof item === "object" && !Array.isArray(item));
+        assert.deepEqual(Object.keys(item).sort(), ["licenseFile", "root", "sha256", "spdx"]);
+        assert.ok(safeRelative(item.root) && safeRelative(item.licenseFile));
+        assert.ok(item.spdx === "MIT" || item.spdx === "Apache-2.0");
+        const prefix = `${dirname(manifest)}/${item.root}/`;
+        context = `${manifest}: package ${item.root}, license ${prefix + item.licenseFile}`;
+        assert.equal(typeof item.sha256, "string");
+        assert.match(item.sha256, /^[a-f0-9]{64}$/);
+        assert.ok(
+          packages.every((other) => !prefix.startsWith(other.prefix) && !other.prefix.startsWith(prefix)),
+          "license package boundaries must not overlap",
+        );
+        const license = readTracked(prefix + item.licenseFile, true);
+        assert.equal(createHash("sha256").update(license).digest("hex"), item.sha256);
+        const text = license.toString("utf8");
+        if (item.spdx === "MIT") {
+          assert.match(text, /MIT License/);
+          assert.ok(!text.includes(["Apache", " License"].join("")));
+        } else {
+          assert.match(text, /Apache\s+License[\s\S]*Version\s+2\.0(?=[\s,]|$)/);
+        }
+        packages.push({ prefix, spdx: item.spdx });
       }
-      packages.push({ prefix, spdx: item.spdx });
+    } catch (cause) {
+      throw new Error(`License validation failed for ${context}`, { cause });
     }
   }
   return tracked.filter((path) => {

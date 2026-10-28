@@ -226,3 +226,54 @@ export async function extraLicenseCases(
 await extraLicenseCases(apacheLicenseOffenders, sandbox, async (name, fn) => {
   await test(name, fn);
 });
+
+{
+  const fixture = (version: string, hash?: string) => {
+    const root = mkdtempSync(join(sandbox, "header-"));
+    const manifest = "deploy/layers/example/LICENSE-PACKAGES.json";
+    const license = "deploy/layers/example/vendor/LICENSE";
+    const text = ["Apache", " License\nVersion " + version + "\n"].join("");
+    mkdirSync(join(root, license, ".."), { recursive: true });
+    writeFileSync(join(root, license), text);
+    writeFileSync(
+      join(root, manifest),
+      JSON.stringify({
+        version: 1,
+        packages: [{ root: "vendor", licenseFile: "LICENSE", spdx: "Apache-2.0", sha256: hash ?? sha(text) }],
+      }),
+    );
+    return { root, manifest, license, tracked: [manifest, license] };
+  };
+  for (const version of ["2.01", "2.0.1", "2.0draft"]) {
+    await test(`license: complete version token rejects ${version}`, () => {
+      const f = fixture(version);
+      assert.throws(() => apacheLicenseOffenders(f.root, f.tracked));
+    });
+  }
+  await test("license: malformed manifest identifies its path and original cause", () => {
+    const f = fixture("2.0, January 2004");
+    writeFileSync(join(f.root, f.manifest), "{malformed");
+    assert.throws(
+      () => apacheLicenseOffenders(f.root, f.tracked),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes(f.manifest));
+        assert.ok(error.cause instanceof SyntaxError);
+        return true;
+      },
+    );
+  });
+  await test("license: hash mismatch identifies manifest and license with assertion cause", () => {
+    const f = fixture("2.0, January 2004", "0".repeat(64));
+    assert.throws(
+      () => apacheLicenseOffenders(f.root, f.tracked),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes(f.manifest) && error.message.includes(f.license));
+        assert.ok(error.cause && typeof error.cause === "object" && "code" in error.cause);
+        assert.equal(error.cause.code, "ERR_ASSERTION");
+        return true;
+      },
+    );
+  });
+}

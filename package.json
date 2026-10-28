@@ -64,7 +64,7 @@
     "build:app-annotations": "node scripts/build-app-devbar.mjs"
   },
   "lint-staged": {
-    "*": "prettier --write --ignore-unknown"
+    "*": "node scripts/repository-format.mjs --write"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.280",
@@ -146,6 +146,7 @@
     "husky": "9.1.7",
     "knip": "^6.26.0",
     "lint-staged": "17.0.1",
+    "minimatch": "10.2.5",
     "oxlint": "^1.74.0",
     "prettier": "3.9.1",
     "tsrs": "0.14.1-ts7.1.0-dev.20260929",
